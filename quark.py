@@ -121,7 +121,7 @@ class QuarkPanFileManager:
 
                 page += 1
 
-    async def get_sorted_file_list(self, pdir_fid='0', page='1', size='100', fetch_total='false',
+    async def get_sorted_file_list(self, pdir_fid='0', page='1', size='100', fetch_total='1',
                                    sort='') -> dict[str, Any]:
         params = {
             'pr': 'ucpro',
@@ -131,7 +131,7 @@ class QuarkPanFileManager:
             '_page': page,
             '_size': size,
             '_fetch_total': fetch_total,
-            '_fetch_sub_dirs': '1',
+            '_fetch_sub_dirs': '0',
             '_sort': sort,
             '__dt': random.randint(100, 9999),
             '__t': get_timestamp(13),
@@ -164,7 +164,17 @@ class QuarkPanFileManager:
                 with open(f'{CONFIG_DIR}/cookies.txt', 'w', encoding='utf-8'):
                     sys.exit(-1)
 
-    async def create_dir(self, pdir_name='新建文件夹') -> None:
+    async def create_dir(self, pdir_name='新建文件夹', pdir_fid='0') -> str | None:
+        """
+        创建文件夹
+        
+        Args:
+            pdir_name: 文件夹名称
+            pdir_fid: 父目录ID，'0'表示根目录
+        
+        Returns:
+            成功返回新文件夹的 fid，失败返回 None
+        """
         params = {
             'pr': 'ucpro',
             'fr': 'pc',
@@ -174,7 +184,7 @@ class QuarkPanFileManager:
         }
 
         json_data = {
-            'pdir_fid': '0',
+            'pdir_fid': pdir_fid,
             'file_name': pdir_name,
             'dir_path': '',
             'dir_init_lock': False,
@@ -186,16 +196,21 @@ class QuarkPanFileManager:
                                          json=json_data, headers=self.headers, timeout=timeout)
             json_data = response.json()
             if json_data["code"] == 0:
-                custom_print(f'根目录下 {pdir_name} 文件夹创建成功！')
-                new_config = {'user': self.user, 'pdir_id': json_data["data"]["fid"], 'dir_name': pdir_name}
+                parent_name = '根目录' if pdir_fid == '0' else pdir_fid
+                custom_print(f'{parent_name} 下 {pdir_name} 文件夹创建成功！')
+                new_fid = json_data["data"]["fid"]
+                new_config = {'user': self.user, 'pdir_id': new_fid, 'dir_name': pdir_name}
                 save_config(f'{CONFIG_DIR}/config.json', content=json.dumps(new_config, ensure_ascii=False))
                 global to_dir_id
-                to_dir_id = json_data["data"]["fid"]
+                to_dir_id = new_fid
                 custom_print(f"自动将保存目录切换至 {pdir_name} 文件夹")
+                return new_fid
             elif json_data["code"] == 23008:
                 custom_print('文件夹同名冲突，请更换一个文件夹名称后重试', error_msg=True)
+                return None
             else:
                 custom_print(f"错误信息：{json_data['message']}", error_msg=True)
+                return None
 
     async def run(self, input_line: str, folder_id: Union[str, None] = None, download: bool = False) -> None:
         self.folder_id = folder_id
@@ -481,8 +496,8 @@ class QuarkPanFileManager:
                 new_config = {'user': self.user, 'pdir_id': self.pdir_id, 'dir_name': self.dir_name}
                 save_config(f'{CONFIG_DIR}/config.json', content=json.dumps(new_config, ensure_ascii=False))
 
-            elif len(pdir_id) < 32:
-                file_list_data = await self.get_sorted_file_list()
+            elif len(pdir_id) <= 32:
+                file_list_data = await self.get_sorted_file_list(pdir_id)
                 fd_list = file_list_data['data']['list']
                 fd_list = [{i['fid']: i['file_name']} for i in fd_list if i.get('dir')]
                 if fd_list:
@@ -866,7 +881,10 @@ if __name__ == '__main__':
             elif input_text.strip() == '4':
                 create_name = input("请输入需要创建的文件夹名称：")
                 if create_name:
-                    asyncio.run(quark_file_manager.create_dir(create_name.strip()))
+                    parent_dir_id = input("请输入父目录ID(直接回车默认在根目录下创建)：").strip()
+                    if not parent_dir_id:
+                        parent_dir_id = '0'
+                    asyncio.run(quark_file_manager.create_dir(create_name.strip(), pdir_fid=parent_dir_id))
                 else:
                     custom_print("创建的文件夹名称不可为空！", error_msg=True)
 
