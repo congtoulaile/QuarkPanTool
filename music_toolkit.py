@@ -18,7 +18,7 @@
   python music_toolkit.py /path/to/music -y              跳过确认直接执行
   python music_toolkit.py /path/to/music --steps 1,2,3   只执行指定步骤
   python music_toolkit.py /path/to/music --no-fetch      不查询网络API（跳过标签的专辑/流派）
-  python music_toolkit.py /path/to/music --min-size 5    设置最小文件大小为5MB（默认8MB）
+  python music_toolkit.py /path/to/music --min-size 5    设置最小文件大小为5MB（默认3MB）
 """
 
 import os
@@ -804,7 +804,7 @@ def main():
   %(prog)s /path/to/music --min-size 5      最小文件大小改为 5MB
 
 处理步骤:
-  Step 1: 🧹 清理垃圾      删除 .mgg 等格式 + 小于 8MB 的音频
+  Step 1: 🧹 清理垃圾      删除 .mgg 等格式 + 小于 3MB 的音频
   Step 2: 🔍 去重          同目录下重复文件/同歌不同格式去重
   Step 3: ✏️  修复文件名    去掉 (1) 后缀、[livepoo.cn] 前缀
   Step 4: 🏷️  修复标签      从文件名解析歌名/歌手 + MusicBrainz 查专辑/流派
@@ -820,8 +820,8 @@ def main():
     parser.add_argument("-y", "--yes", action="store_true", help="跳过所有确认")
     parser.add_argument("--steps", default="1,2,3,4",
                         help="要执行的步骤，逗号分隔 (默认: 1,2,3,4)")
-    parser.add_argument("--min-size", type=float, default=8,
-                        help="最小文件大小(MB)，低于此值的音频文件将被删除 (默认: 8)")
+    parser.add_argument("--min-size", type=float, default=3,
+                        help="最小文件大小(MB)，低于此值的音频文件将被删除 (默认: 3)")
     parser.add_argument("--sep", default="-",
                         help="文件名中歌名与歌手的分隔符 (默认: -)")
     parser.add_argument("--artist-first", action="store_true",

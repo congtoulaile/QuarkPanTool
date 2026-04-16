@@ -219,6 +219,111 @@ def _fetch_release_group_genre(release_group_id):
 # ──────────────────────────────────────────────
 #  写入标签
 # ──────────────────────────────────────────────
+def read_existing_tags(filepath):
+    """
+    读取音频文件中已有的标签信息
+
+    Args:
+        filepath: 音频文件路径
+
+    Returns:
+        dict: {"title": str, "artist": str, "album": str, "genre": str, "year": str}
+              值为 None 表示该字段不存在或为空
+    """
+    result = {"title": None, "artist": None, "album": None, "genre": None, "year": None}
+
+    try:
+        audio = MutagenFile(str(filepath))
+        if audio is None or audio.tags is None:
+            return result
+
+        ext = Path(filepath).suffix.lower()
+
+        if isinstance(audio, MP3):
+            try:
+                id3 = ID3(str(filepath))
+                result["title"] = _get_id3_text(id3, "TIT2")
+                result["artist"] = _get_id3_text(id3, "TPE1")
+                result["album"] = _get_id3_text(id3, "TALB")
+                result["genre"] = _get_id3_text(id3, "TCON")
+                result["year"] = _get_id3_text(id3, "TDRC")
+            except ID3NoHeaderError:
+                pass
+        elif isinstance(audio, (FLAC, OggVorbis)):
+            result["title"] = _get_vorbis_text(audio, "title")
+            result["artist"] = _get_vorbis_text(audio, "artist")
+            result["album"] = _get_vorbis_text(audio, "album")
+            result["genre"] = _get_vorbis_text(audio, "genre")
+            result["year"] = _get_vorbis_text(audio, "date")
+        elif isinstance(audio, MP4):
+            result["title"] = _get_mp4_text(audio, "\xa9nam")
+            result["artist"] = _get_mp4_text(audio, "\xa9ART")
+            result["album"] = _get_mp4_text(audio, "\xa9alb")
+            result["genre"] = _get_mp4_text(audio, "\xa9gen")
+            result["year"] = _get_mp4_text(audio, "\xa9day")
+    except Exception:
+        pass
+
+    return result
+
+
+def _get_id3_text(id3, key):
+    """从 ID3 标签中获取文本值，为空或无效则返回 None"""
+    frame = id3.get(key)
+    if frame:
+        text = str(frame)
+        if text and text.strip():
+            return text.strip()
+    return None
+
+
+def _get_vorbis_text(audio, key):
+    """从 Vorbis Comment 中获取文本值，为空或无效则返回 None"""
+    values = audio.tags.get(key)
+    if values:
+        # Vorbis Comment 的值是列表
+        text = values[0] if isinstance(values, list) else str(values)
+        if text and text.strip():
+            return text.strip()
+    return None
+
+
+def _get_mp4_text(audio, key):
+    """从 MP4 标签中获取文本值，为空或无效则返回 None"""
+    values = audio.tags.get(key)
+    if values:
+        text = values[0] if isinstance(values, list) else str(values)
+        if text and text.strip():
+            return text.strip()
+    return None
+
+
+# 已知的无效标签值（各音乐平台的水印/占位符）
+INVALID_TAG_VALUES = {
+    "kuwo", "kw", "酷我音乐", "酷我",
+    "kugou", "kg", "酷狗音乐", "酷狗",
+    "qqmusic", "qq音乐", "qq music",
+    "netease", "网易云音乐", "网易云",
+    "xiami", "虾米音乐", "虾米",
+    "unknown", "未知", "none", "",
+}
+
+
+def is_valid_tag(value):
+    """
+    判断一个标签值是否有效（非空且不是已知的无效/水印值）
+
+    Args:
+        value: 标签值字符串
+
+    Returns:
+        bool: True 表示有效，False 表示无效需要修复
+    """
+    if not value or not value.strip():
+        return False
+    return value.strip().lower() not in INVALID_TAG_VALUES
+
+
 def write_tags(filepath, title=None, artist=None, album=None, genre=None, year=None):
     """
     将标签信息写入音频文件
@@ -318,6 +423,7 @@ def process_file(filepath, separator="-", artist_first=False,
                  fetch_online=True, dry_run=False, skip_confirm=False):
     """
     处理单个音频文件
+    如果文件已存在正确的标签信息，则保留原有标签不做修改，仅修复缺失或无效的字段。
 
     Args:
         filepath:      文件路径
@@ -335,20 +441,46 @@ def process_file(filepath, separator="-", artist_first=False,
     print(f"{BOLD}📄 {filepath.name}{RESET}")
     print(f"{'─' * 55}")
 
-    # 1. 从文件名解析
+    # 1. 读取文件中已有的标签
+    existing = read_existing_tags(filepath)
+
+    print(f"  {CYAN}现有标签:{RESET}")
+    tag_labels = {"title": "标题", "artist": "艺术家", "album": "专辑", "genre": "流派", "year": "年份"}
+    all_valid = True
+    for key, label in tag_labels.items():
+        val = existing.get(key)
+        valid = is_valid_tag(val)
+        if not valid:
+            all_valid = False
+        status = f"{GREEN}✓{RESET}" if valid else f"{RED}✗{RESET}"
+        display_val = val if val else "(空)"
+        if val and not is_valid_tag(val):
+            display_val = f"{val} {RED}(无效){RESET}"
+        print(f"    {status} {label}: {display_val}")
+
+    # 如果所有标签都有效，跳过该文件
+    if all_valid:
+        print(f"\n  {GREEN}✅ 所有标签信息完整有效，无需修复{RESET}")
+        return False
+
+    # 2. 从文件名解析
     title, artist = parse_filename(filepath, separator)
     if artist_first and artist:
         title, artist = artist, title
 
     artist = clean_artist_name(artist)
 
-    print(f"  {GREEN}从文件名解析:{RESET}")
+    print(f"\n  {GREEN}从文件名解析:{RESET}")
     print(f"    标题:   {title}")
     print(f"    艺术家: {artist or '(无)'}")
 
-    # 2. 在线查询
+    # 3. 在线查询（仅当需要专辑/流派/年份且现有值无效时查询）
     online_info = {}
-    if fetch_online and title:
+    need_online = (not is_valid_tag(existing.get("album"))
+                   or not is_valid_tag(existing.get("genre"))
+                   or not is_valid_tag(existing.get("year")))
+
+    if fetch_online and title and need_online:
         print(f"\n  {CYAN}🔍 正在查询 MusicBrainz...{RESET}", end="", flush=True)
         online_info = search_musicbrainz(title, artist)
 
@@ -362,34 +494,48 @@ def process_file(filepath, separator="-", artist_first=False,
                 print(f"    年份:   {online_info['year']}")
         else:
             print(f" {YELLOW}✗ 未找到匹配结果{RESET}")
+    elif fetch_online and not need_online:
+        print(f"\n  {DIM}🔍 专辑/流派/年份已存在，跳过网络查询{RESET}")
 
-    # 3. 汇总要写入的信息
+    # 4. 汇总要写入的信息 —— 仅修复无效/缺失字段，保留已有正确值
     new_tags = {}
-    if title:
+
+    if not is_valid_tag(existing.get("title")) and title:
         new_tags["标题"] = title
-    if artist:
+
+    if not is_valid_tag(existing.get("artist")) and artist:
         new_tags["艺术家"] = artist
-    if online_info.get("album"):
+
+    if not is_valid_tag(existing.get("album")) and online_info.get("album"):
         new_tags["专辑"] = online_info["album"]
-    if online_info.get("genre"):
+
+    if not is_valid_tag(existing.get("genre")) and online_info.get("genre"):
         new_tags["流派"] = online_info["genre"]
-    if online_info.get("year"):
+
+    if not is_valid_tag(existing.get("year")) and online_info.get("year"):
         new_tags["年份"] = online_info["year"]
 
     if not new_tags:
-        print(f"\n  {YELLOW}⚠ 没有可写入的信息，跳过{RESET}")
+        print(f"\n  {YELLOW}⚠ 没有需要修复的标签（有效字段已保留，缺失字段无可用数据），跳过{RESET}")
         return False
 
-    # 4. 展示要写入的内容
-    print(f"\n  {BOLD}📝 将写入以下标签:{RESET}")
-    for key, val in new_tags.items():
-        print(f"    {YELLOW}{key:　<6}{RESET}: {val}")
+    # 5. 展示要写入的内容（标注哪些是保留的、哪些是新写入的）
+    print(f"\n  {BOLD}📝 标签修复计划:{RESET}")
+    for key, label in tag_labels.items():
+        old_val = existing.get(key)
+        if label in new_tags:
+            # 需要修复的字段
+            old_display = old_val if old_val else "(空)"
+            print(f"    {YELLOW}🔧 {label}{RESET}: {DIM}{old_display}{RESET} → {GREEN}{new_tags[label]}{RESET}")
+        elif is_valid_tag(old_val):
+            # 保留的字段
+            print(f"    {DIM}✓  {label}: {old_val} (保留){RESET}")
 
     if dry_run:
         print(f"\n  {DIM}[预览模式，未实际写入]{RESET}")
         return True
 
-    # 5. 确认
+    # 6. 确认
     if not skip_confirm:
         answer = input(f"\n  是否写入? (y/N/s=跳过): ").strip().lower()
         if answer == "s":
@@ -399,7 +545,7 @@ def process_file(filepath, separator="-", artist_first=False,
             print(f"  ❌ 已取消")
             return False
 
-    # 6. 写入
+    # 7. 写入（只写入需要修复的字段）
     try:
         write_tags(
             filepath,
