@@ -12,7 +12,7 @@
 依赖: pip install mutagen httpx
 
 使用示例:
-  python music_toolkit.py /path/to/music                 执行全部步骤（交互确认）
+  python music_toolkit.py /path/to/music                 执行全部步骤（自动执行）
   python music_toolkit.py /path/to/music -r              递归扫描子目录
   python music_toolkit.py /path/to/music --dry-run       预览模式，不做任何修改
   python music_toolkit.py /path/to/music -y              跳过确认直接执行
@@ -624,6 +624,74 @@ def _fetch_rg_genre(rg_id):
     return {}
 
 
+# 已知的无效标签值（音乐平台水印/占位符）
+INVALID_TAG_VALUES = {
+    "kuwo", "kw", "酷我音乐", "酷我",
+    "kugou", "kg", "酷狗音乐", "酷狗",
+    "qqmusic", "qq音乐", "qq music",
+    "netease", "网易云音乐", "网易云",
+    "xiami", "虾米音乐", "虾米",
+    "unknown", "未知", "none", "",
+}
+
+
+def is_valid_tag(value):
+    """判断标签值是否有效（非空且不是已知的无效/水印值）"""
+    if not value or not value.strip():
+        return False
+    return value.strip().lower() not in INVALID_TAG_VALUES
+
+
+def read_existing_tags(filepath):
+    """读取音频文件中已有的 title 和 artist 标签"""
+    result = {"title": None, "artist": None}
+    try:
+        audio = MutagenFile(str(filepath))
+        if audio is None or audio.tags is None:
+            return result
+
+        if isinstance(audio, MP3):
+            try:
+                id3 = ID3(str(filepath))
+                t = id3.get("TIT2")
+                if t:
+                    text = str(t).strip()
+                    if text:
+                        result["title"] = text
+                a = id3.get("TPE1")
+                if a:
+                    text = str(a).strip()
+                    if text:
+                        result["artist"] = text
+            except ID3NoHeaderError:
+                pass
+        elif isinstance(audio, (FLAC, OggVorbis)):
+            vals = audio.tags.get("title")
+            if vals:
+                text = (vals[0] if isinstance(vals, list) else str(vals)).strip()
+                if text:
+                    result["title"] = text
+            vals = audio.tags.get("artist")
+            if vals:
+                text = (vals[0] if isinstance(vals, list) else str(vals)).strip()
+                if text:
+                    result["artist"] = text
+        elif isinstance(audio, MP4):
+            vals = audio.tags.get("\xa9nam")
+            if vals:
+                text = (vals[0] if isinstance(vals, list) else str(vals)).strip()
+                if text:
+                    result["title"] = text
+            vals = audio.tags.get("\xa9ART")
+            if vals:
+                text = (vals[0] if isinstance(vals, list) else str(vals)).strip()
+                if text:
+                    result["artist"] = text
+    except Exception:
+        pass
+    return result
+
+
 def write_tags(filepath, title=None, artist=None, album=None, genre=None, year=None):
     """写入标签"""
     audio = MutagenFile(str(filepath))
@@ -681,7 +749,7 @@ def write_tags(filepath, title=None, artist=None, album=None, genre=None, year=N
 
 def step_fix_tags(root_path, recursive=False, separator="-", artist_first=False,
                   fetch_online=True, dry_run=False, skip_confirm=False):
-    """修复标签"""
+    """修复标签 —— 逐文件处理，查询完一个立即写入一个"""
     print_step_header(4, "修复标签", "🏷️")
 
     audio_files = [
@@ -697,10 +765,25 @@ def step_fix_tags(root_path, recursive=False, separator="-", artist_first=False,
     if fetch_online:
         print(f"  {DIM}(将通过 MusicBrainz API 查询专辑/流派，限速 1 请求/秒){RESET}")
 
-    # 先收集所有待写入的信息
-    tag_plan = []  # (filepath, tags_dict)
+    label_map = {"title": "标题", "artist": "艺术家", "album": "专辑",
+                 "genre": "流派", "year": "年份"}
+    updated = 0
+    skipped = 0
+    failed = 0
 
     for i, fpath in enumerate(audio_files):
+        print(f"\n  {'─' * 50}")
+        print(f"  {BOLD}[{i+1}/{len(audio_files)}] 📄 {fpath.name}{RESET}")
+
+        # 读取现有标签，如果 title 和 artist 都有效则跳过
+        existing = read_existing_tags(fpath)
+        if is_valid_tag(existing.get("title")) and is_valid_tag(existing.get("artist")):
+            print(f"    {GREEN}✓ 标题: {existing['title']}{RESET}")
+            print(f"    {GREEN}✓ 艺术家: {existing['artist']}{RESET}")
+            print(f"    {DIM}标签已完整，跳过{RESET}")
+            skipped += 1
+            continue
+
         title, artist = parse_song_from_filename(fpath, separator)
         if artist_first and artist:
             title, artist = artist, title
@@ -718,8 +801,7 @@ def step_fix_tags(root_path, recursive=False, separator="-", artist_first=False,
         # 在线查询
         online = {}
         if fetch_online and title:
-            print(f"  {DIM}[{i+1}/{len(audio_files)}] 查询: {title} - {artist or '?'}...{RESET}",
-                  end="", flush=True)
+            print(f"    {CYAN}🔍 查询: {title} - {artist or '?'}...{RESET}", end="", flush=True)
             online = search_musicbrainz(title, artist)
             if online:
                 print(f" {GREEN}✓{RESET}")
@@ -733,42 +815,30 @@ def step_fix_tags(root_path, recursive=False, separator="-", artist_first=False,
             if online.get("year"):
                 tags["year"] = online["year"]
 
+        if not tags:
+            print(f"    {DIM}无标签信息可写入，跳过{RESET}")
+            skipped += 1
             # MusicBrainz 限速
-            if i < len(audio_files) - 1:
+            if fetch_online and i < len(audio_files) - 1:
                 time.sleep(1.1)
+            continue
 
-        if tags:
-            tag_plan.append((fpath, tags))
-
-    if not tag_plan:
-        print(f"\n  {GREEN}✅ 无标签需要更新{RESET}")
-        return 0
-
-    # 展示计划
-    print(f"\n  {BOLD}标签更新计划 ({len(tag_plan)} 个文件):{RESET}\n")
-    for fpath, tags in tag_plan:
-        print(f"    {CYAN}{fpath.name}{RESET}")
+        # 展示当前文件要写入的标签
         for k, v in tags.items():
-            label_map = {"title": "标题", "artist": "艺术家", "album": "专辑",
-                         "genre": "流派", "year": "年份"}
             display = str(v)
             if len(display) > 60:
                 display = display[:60] + "..."
             print(f"      {YELLOW}{label_map.get(k, k):　<5}{RESET}: {display}")
-        print()
 
-    if dry_run:
-        print(f"  {DIM}[预览模式 — 不会写入标签]{RESET}")
-        return len(tag_plan)
+        if dry_run:
+            print(f"    {DIM}[预览模式，未写入]{RESET}")
+            updated += 1
+            # MusicBrainz 限速
+            if fetch_online and i < len(audio_files) - 1:
+                time.sleep(1.1)
+            continue
 
-    if not skip_confirm:
-        answer = input(f"  确认更新以上 {len(tag_plan)} 个文件的标签? (y/N): ").strip().lower()
-        if answer not in ("y", "yes"):
-            print(f"  {DIM}已跳过 Step 4{RESET}")
-            return 0
-
-    updated = 0
-    for fpath, tags in tag_plan:
+        # 立即写入当前文件
         try:
             write_tags(
                 fpath,
@@ -778,11 +848,24 @@ def step_fix_tags(root_path, recursive=False, separator="-", artist_first=False,
                 genre=tags.get("genre"),
                 year=tags.get("year"),
             )
+            print(f"    {GREEN}✅ 标签已写入{RESET}")
             updated += 1
         except Exception as e:
-            print(f"    {RED}❌ {fpath.name}: {e}{RESET}")
+            print(f"    {RED}❌ 写入失败: {e}{RESET}")
+            failed += 1
 
-    print(f"\n  {GREEN}✅ 已更新 {updated} 个文件的标签{RESET}")
+        # MusicBrainz 限速
+        if fetch_online and i < len(audio_files) - 1:
+            time.sleep(1.1)
+
+    # 汇总
+    print(f"\n  {'─' * 50}")
+    print(f"  {GREEN}✅ 完成: {updated} 个文件已更新{RESET}", end="")
+    if skipped:
+        print(f"  {DIM}| {skipped} 个跳过{RESET}", end="")
+    if failed:
+        print(f"  {RED}| {failed} 个失败{RESET}", end="")
+    print()
     return updated
 
 
@@ -795,10 +878,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用示例:
-  %(prog)s /path/to/music                   执行全部 4 个步骤（交互确认）
+  %(prog)s /path/to/music                   执行全部 4 个步骤（自动执行）
   %(prog)s /path/to/music -r                递归扫描子目录
   %(prog)s /path/to/music --dry-run         预览模式，不做任何修改
-  %(prog)s /path/to/music -y                跳过确认直接执行
   %(prog)s /path/to/music --steps 1,2,3     只执行指定步骤
   %(prog)s /path/to/music --steps 4 --no-fetch   只修复标签，不查网络
   %(prog)s /path/to/music --min-size 5      最小文件大小改为 5MB
@@ -810,14 +892,15 @@ def main():
   Step 4: 🏷️  修复标签      从文件名解析歌名/歌手 + MusicBrainz 查专辑/流派
 
 建议:
-  首次使用先加 --dry-run 预览全部步骤的效果，确认无误再正式执行
+  首次使用先加 --dry-run 预览全部步骤的效果，确认无误后去掉 --dry-run 正式执行
         """,
     )
 
     parser.add_argument("directory", help="音乐文件目录路径")
     parser.add_argument("-r", "--recursive", action="store_true", help="递归扫描子目录")
     parser.add_argument("--dry-run", action="store_true", help="预览模式，不做任何修改")
-    parser.add_argument("-y", "--yes", action="store_true", help="跳过所有确认")
+    parser.add_argument("-y", "--yes", action="store_true", default=True,
+                        help="默认自动执行，无需确认")
     parser.add_argument("--steps", default="1,2,3,4",
                         help="要执行的步骤，逗号分隔 (默认: 1,2,3,4)")
     parser.add_argument("--min-size", type=float, default=3,
